@@ -1,4 +1,11 @@
 import { DAVClient, DAVCalendar, DAVCalendarObject } from 'tsdav';
+import { createRequire } from 'module';
+const _require = createRequire(import.meta.url);
+// rrule ships without "type":"module" so its .js files are CJS — load via createRequire
+const { RRule, RRuleSet } = _require('rrule') as {
+  RRule: typeof import('rrule').RRule;
+  RRuleSet: typeof import('rrule').RRuleSet;
+};
 
 export interface CalDAVConfig {
   username: string;
@@ -113,6 +120,102 @@ export function parseCalendarObject(obj: DAVCalendarObject): CalendarEvent {
 }
 
 /**
+ * Parse a compact iCal date/datetime value (from parseICalValue) into a Date.
+ * Treats the time as UTC for rrule computation purposes.
+ */
+function parseICalDateToDate(raw: string): Date | undefined {
+  const cleaned = raw.replace(/\r/g, '');
+  // All-day: YYYYMMDD
+  if (/^\d{8}$/.test(cleaned)) {
+    return new Date(`${cleaned.slice(0, 4)}-${cleaned.slice(4, 6)}-${cleaned.slice(6, 8)}T00:00:00Z`);
+  }
+  // DateTime: YYYYMMDDTHHMMSS or YYYYMMDDTHHMMSSZ
+  const m = cleaned.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/);
+  if (m) {
+    return new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`);
+  }
+  return undefined;
+}
+
+/**
+ * Format a Date back to ISO 8601 in the same style as the original DTSTART.
+ */
+function formatOccurrenceDate(date: Date, isAllDay: boolean, hasZ: boolean): string {
+  if (isAllDay) {
+    return date.toISOString().slice(0, 10);
+  }
+  const iso = date.toISOString(); // e.g. 2026-03-31T18:00:00.000Z
+  const base = `${iso.slice(0, 10)}T${iso.slice(11, 19)}`;
+  return hasZ ? `${base}Z` : base;
+}
+
+/**
+ * Expand a calendar object's recurring event into individual occurrences
+ * within [timeMin, timeMax]. Returns the base event if no RRULE is present.
+ * Returns an empty array if RRULE is present but no occurrences fall in range.
+ */
+export function expandRecurringEvent(
+  obj: DAVCalendarObject,
+  timeMin: string,
+  timeMax: string,
+): CalendarEvent[] {
+  const vevent = extractVEvent(obj.data || '');
+  const rruleStr = parseICalValue(vevent, 'RRULE');
+  const baseEvent = parseCalendarObject(obj);
+
+  if (!rruleStr) {
+    return [baseEvent];
+  }
+
+  const rawStart = parseICalValue(vevent, 'DTSTART');
+  if (!rawStart) return [baseEvent];
+
+  const cleanedStart = rawStart.replace(/\r/g, '');
+  const isAllDay = /^\d{8}$/.test(cleanedStart);
+  const hasZ = cleanedStart.endsWith('Z');
+
+  const dtstart = parseICalDateToDate(cleanedStart);
+  if (!dtstart) return [baseEvent];
+
+  const rawEnd = parseICalValue(vevent, 'DTEND');
+  const dtend = rawEnd ? parseICalDateToDate(rawEnd.replace(/\r/g, '')) : undefined;
+  const durationMs = dtend ? dtend.getTime() - dtstart.getTime() : 0;
+
+  try {
+    const rrule = new RRule({ ...RRule.parseString(rruleStr), dtstart });
+
+    // Collect EXDATEs if present
+    const exdateMatches = (obj.data || '').match(/^EXDATE[;:].+$/gm) || [];
+    let rule: InstanceType<typeof RRule> | InstanceType<typeof RRuleSet> = rrule;
+    if (exdateMatches.length > 0) {
+      const set = new RRuleSet();
+      set.rrule(rrule);
+      for (const line of exdateMatches) {
+        const val = line.substring(line.indexOf(':') + 1).trim();
+        const exdate = parseICalDateToDate(val);
+        if (exdate) set.exdate(exdate);
+      }
+      rule = set;
+    }
+
+    const after = new Date(timeMin);
+    const before = new Date(timeMax);
+    const occurrences = rule.between(after, before, true);
+
+    return occurrences.map((occ: Date) => {
+      const occEnd = durationMs > 0 ? new Date(occ.getTime() + durationMs) : undefined;
+      return {
+        ...baseEvent,
+        start: formatOccurrenceDate(occ, isAllDay, hasZ),
+        end: occEnd ? formatOccurrenceDate(occEnd, isAllDay, hasZ) : baseEvent.end,
+      };
+    });
+  } catch {
+    return [baseEvent];
+  }
+}
+
+/**
  * Convert an ISO 8601 datetime string to iCalendar datetime format.
  * Handles timezone offsets by converting to UTC (YYYYMMDDTHHMMSSZ).
  * Handles all-day dates (YYYY-MM-DD → YYYYMMDD).
@@ -201,7 +304,16 @@ export class CalDAVCalendarClient {
     for (const cal of targetCalendars) {
       const objects = await client.fetchCalendarObjects({ ...fetchOptions, calendar: cal });
       for (const obj of objects) {
-        allEvents.push(parseCalendarObject(obj));
+        if (timeMin || timeMax) {
+          const expanded = expandRecurringEvent(
+            obj,
+            timeMin || '1970-01-01T00:00:00Z',
+            timeMax || '2099-12-31T23:59:59Z',
+          );
+          allEvents.push(...expanded);
+        } else {
+          allEvents.push(parseCalendarObject(obj));
+        }
       }
       if (allEvents.length >= limit) break;
     }

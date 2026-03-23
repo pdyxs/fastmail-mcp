@@ -5,6 +5,7 @@ import {
   parseICalValue,
   formatICalDate,
   parseCalendarObject,
+  expandRecurringEvent,
 } from './caldav-client.js';
 
 describe('extractVEvent', () => {
@@ -221,5 +222,120 @@ describe('parseCalendarObject', () => {
     assert.equal(event.description, undefined);
     assert.equal(event.location, undefined);
     assert.equal(event.end, undefined);
+  });
+});
+
+describe('expandRecurringEvent', () => {
+  function makeObj(lines: string[]): { data: string; url: string } {
+    return { data: lines.join('\r\n'), url: 'https://caldav.example.com/cal/event.ics' };
+  }
+
+  it('returns base event unchanged when no RRULE', () => {
+    const obj = makeObj([
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:nonrecurring@test',
+      'DTSTART:20260325T100000Z',
+      'DTEND:20260325T110000Z',
+      'SUMMARY:One-off',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ]);
+    const results = expandRecurringEvent(obj, '2026-03-25T00:00:00Z', '2026-03-31T23:59:59Z');
+    assert.equal(results.length, 1);
+    assert.equal(results[0].start, '2026-03-25T10:00:00Z');
+  });
+
+  it('expands weekly RRULE and returns occurrences in range', () => {
+    // Weekly on Tuesdays, started 2024-06-18 (a Tuesday)
+    const obj = makeObj([
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:climb@test',
+      'DTSTART:20240618T180000Z',
+      'DTEND:20240618T200000Z',
+      'SUMMARY:Climb',
+      'RRULE:FREQ=WEEKLY;BYDAY=TU',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ]);
+    // Week of 2026-03-25 to 2026-03-31 contains Tuesday 2026-03-31
+    const results = expandRecurringEvent(obj, '2026-03-25T00:00:00Z', '2026-03-31T23:59:59Z');
+    assert.equal(results.length, 1);
+    assert.equal(results[0].title, 'Climb');
+    assert.equal(results[0].start, '2026-03-31T18:00:00Z');
+    assert.equal(results[0].end, '2026-03-31T20:00:00Z');
+  });
+
+  it('returns empty array when RRULE has no occurrences in range', () => {
+    // Weekly on Sundays, querying a range with no Sunday
+    const obj = makeObj([
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:sunday@test',
+      'DTSTART:20240616T100000Z',
+      'DTEND:20240616T110000Z',
+      'SUMMARY:Sunday Event',
+      'RRULE:FREQ=WEEKLY;BYDAY=SU',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ]);
+    // 2026-03-26 is a Thursday — query Mon-Sat (no Sunday)
+    const results = expandRecurringEvent(obj, '2026-03-23T00:00:00Z', '2026-03-28T23:59:59Z');
+    assert.equal(results.length, 0);
+  });
+
+  it('expands monthly RRULE', () => {
+    const obj = makeObj([
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:monthly@test',
+      'DTSTART:20240131T170000Z',
+      'DTEND:20240131T210000Z',
+      'SUMMARY:Tabletop Tuesdays',
+      'RRULE:FREQ=MONTHLY;BYDAY=-1TU',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ]);
+    // Last Tuesday of March 2026 is 2026-03-31
+    const results = expandRecurringEvent(obj, '2026-03-25T00:00:00Z', '2026-03-31T23:59:59Z');
+    assert.equal(results.length, 1);
+    assert.equal(results[0].start, '2026-03-31T17:00:00Z');
+  });
+
+  it('respects EXDATE exclusions', () => {
+    const obj = makeObj([
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:climb-exdate@test',
+      'DTSTART:20240618T180000Z',
+      'DTEND:20240618T200000Z',
+      'SUMMARY:Climb',
+      'RRULE:FREQ=WEEKLY;BYDAY=TU',
+      'EXDATE:20260331T180000Z',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ]);
+    const results = expandRecurringEvent(obj, '2026-03-25T00:00:00Z', '2026-03-31T23:59:59Z');
+    assert.equal(results.length, 0);
+  });
+
+  it('handles all-day recurring events', () => {
+    const obj = makeObj([
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:allday-weekly@test',
+      'DTSTART;VALUE=DATE:20240101',
+      'DTEND;VALUE=DATE:20240102',
+      'SUMMARY:Weekly All Day',
+      'RRULE:FREQ=WEEKLY;BYDAY=WE',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ]);
+    // 2026-03-25 is a Wednesday
+    const results = expandRecurringEvent(obj, '2026-03-25T00:00:00Z', '2026-03-31T23:59:59Z');
+    assert.equal(results.length, 1);
+    assert.equal(results[0].start, '2026-03-25');
+    assert.equal(results[0].end, '2026-03-26');
   });
 });
