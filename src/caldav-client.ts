@@ -112,6 +112,25 @@ export function parseCalendarObject(obj: DAVCalendarObject): CalendarEvent {
   };
 }
 
+/**
+ * Convert an ISO 8601 datetime string to iCalendar datetime format.
+ * Handles timezone offsets by converting to UTC (YYYYMMDDTHHMMSSZ).
+ * Handles all-day dates (YYYY-MM-DD → YYYYMMDD).
+ */
+function toICalDateTime(dateTimeStr: string): string {
+  // All-day date: YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateTimeStr)) {
+    return dateTimeStr.replace(/-/g, '');
+  }
+  // Parse and convert to UTC
+  const d = new Date(dateTimeStr);
+  if (!isNaN(d.getTime())) {
+    return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  }
+  // Fallback for already-compact formats
+  return dateTimeStr.replace(/[-:]/g, '');
+}
+
 export class CalDAVCalendarClient {
   private config: CalDAVConfig;
   private client: DAVClient | null = null;
@@ -154,7 +173,7 @@ export class CalDAVCalendarClient {
       }));
   }
 
-  async getCalendarEvents(calendarId?: string, limit: number = 50): Promise<CalendarEvent[]> {
+  async getCalendarEvents(calendarId?: string, limit: number = 50, timeMin?: string, timeMax?: string): Promise<CalendarEvent[]> {
     const client = await this.getClient();
 
     if (!this.calendars) {
@@ -170,9 +189,17 @@ export class CalDAVCalendarClient {
       );
     }
 
+    const fetchOptions: Parameters<typeof client.fetchCalendarObjects>[0] = { calendar: targetCalendars[0] };
+    if (timeMin || timeMax) {
+      fetchOptions.timeRange = {
+        start: timeMin || '1970-01-01T00:00:00Z',
+        end: timeMax || '2099-12-31T23:59:59Z',
+      };
+    }
+
     const allEvents: CalendarEvent[] = [];
     for (const cal of targetCalendars) {
-      const objects = await client.fetchCalendarObjects({ calendar: cal });
+      const objects = await client.fetchCalendarObjects({ ...fetchOptions, calendar: cal });
       for (const obj of objects) {
         allEvents.push(parseCalendarObject(obj));
       }
@@ -233,8 +260,8 @@ export class CalDAVCalendarClient {
       'BEGIN:VEVENT',
       `UID:${uid}`,
       `DTSTAMP:${now}`,
-      `DTSTART:${event.start.replace(/[-:]/g, '')}`,
-      `DTEND:${event.end.replace(/[-:]/g, '')}`,
+      `DTSTART:${toICalDateTime(event.start)}`,
+      `DTEND:${toICalDateTime(event.end)}`,
       `SUMMARY:${event.title}`,
       event.description ? `DESCRIPTION:${event.description}` : '',
       event.location ? `LOCATION:${event.location}` : '',

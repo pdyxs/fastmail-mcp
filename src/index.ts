@@ -442,7 +442,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'list_calendar_events',
-        description: 'List events from a calendar',
+        description: 'List events from a calendar, optionally filtered by date range',
         inputSchema: {
           type: 'object',
           properties: {
@@ -454,6 +454,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'number',
               description: 'Maximum number of events to return (default: 50)',
               default: 50,
+            },
+            timeMin: {
+              type: 'string',
+              description: 'Lower bound for events (ISO 8601 UTC, e.g. 2026-03-23T00:00:00Z). Only events ending after this time are returned.',
+            },
+            timeMax: {
+              type: 'string',
+              description: 'Upper bound for events (ISO 8601 UTC, e.g. 2026-03-23T23:59:59Z). Only events starting before this time are returned.',
             },
           },
         },
@@ -1244,7 +1252,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_calendar_events': {
-        const { calendarId, limit = 50 } = args as any;
+        const { calendarId, limit = 50, timeMin, timeMax } = args as any;
         try {
           const contactsClient = initializeContactsCalendarClient();
           const events = await contactsClient.getCalendarEvents(calendarId, limit);
@@ -1254,7 +1262,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (!davClient) {
             throw new McpError(ErrorCode.InvalidRequest, 'JMAP calendars not available and CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD to use CalDAV.');
           }
-          const events = await davClient.getCalendarEvents(calendarId, limit);
+          const events = await davClient.getCalendarEvents(calendarId, limit, timeMin, timeMax);
           return { content: [{ type: 'text', text: JSON.stringify(events, null, 2) }] };
         }
       }
