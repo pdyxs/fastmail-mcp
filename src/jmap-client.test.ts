@@ -591,3 +591,84 @@ describe('validateSavePath', () => {
     );
   });
 });
+
+// ---------- getEmailById ----------
+
+function makeEmailResponse(htmlValue?: string, textValue?: string) {
+  const bodyValues: Record<string, { value: string }> = {};
+  const htmlBody: { partId: string }[] = [];
+  const textBody: { partId: string }[] = [];
+
+  if (htmlValue !== undefined) {
+    bodyValues['html1'] = { value: htmlValue };
+    htmlBody.push({ partId: 'html1' });
+  }
+  if (textValue !== undefined) {
+    bodyValues['text1'] = { value: textValue };
+    textBody.push({ partId: 'text1' });
+  }
+
+  return {
+    methodResponses: [
+      ['Email/get', {
+        list: [{
+          id: 'email-1',
+          subject: 'Test',
+          from: [{ email: 'sender@example.com' }],
+          to: [{ email: 'me@example.com' }],
+          cc: null,
+          bcc: null,
+          receivedAt: '2024-01-01T00:00:00Z',
+          htmlBody,
+          textBody,
+          bodyValues,
+          attachments: [],
+          messageId: ['msg-1'],
+          threadId: 'thread-1',
+          inReplyTo: null,
+          references: null,
+        }],
+      }, 'email'],
+    ],
+  };
+}
+
+describe('getEmailById', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  it('converts HTML body to markdown', async () => {
+    stubMakeRequest(client, makeEmailResponse('<p>Hello <strong>world</strong></p>'));
+    const email = await client.getEmailById('email-1');
+    assert.equal(email.body, 'Hello **world**');
+  });
+
+  it('preserves links from HTML', async () => {
+    stubMakeRequest(client, makeEmailResponse('<p>Visit <a href="https://example.com">Example</a></p>'));
+    const email = await client.getEmailById('email-1');
+    assert.match(email.body, /\[Example\]\(https:\/\/example\.com\)/);
+  });
+
+  it('falls back to plain text when no HTML body', async () => {
+    stubMakeRequest(client, makeEmailResponse(undefined, 'Just plain text'));
+    const email = await client.getEmailById('email-1');
+    assert.equal(email.body, 'Just plain text');
+  });
+
+  it('returns empty string when no body parts', async () => {
+    stubMakeRequest(client, makeEmailResponse());
+    const email = await client.getEmailById('email-1');
+    assert.equal(email.body, '');
+  });
+
+  it('does not expose raw htmlBody/textBody/bodyValues', async () => {
+    stubMakeRequest(client, makeEmailResponse('<p>Hi</p>', 'Hi'));
+    const email = await client.getEmailById('email-1');
+    assert.equal(email.htmlBody, undefined);
+    assert.equal(email.textBody, undefined);
+    assert.equal(email.bodyValues, undefined);
+  });
+});

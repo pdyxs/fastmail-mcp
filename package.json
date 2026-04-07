@@ -27,8 +27,10 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "@types/turndown": "^5.0.6",
     "rrule": "^2.8.1",
-    "tsdav": "^2.1.8"
+    "tsdav": "^2.1.8",
+    "turndown": "^7.2.4"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

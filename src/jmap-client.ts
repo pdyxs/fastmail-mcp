@@ -2,6 +2,7 @@ import { FastmailAuth } from './auth.js';
 import { writeFile, mkdir } from 'fs/promises';
 import { dirname, resolve, normalize } from 'path';
 import { homedir } from 'os';
+import TurndownService from 'turndown';
 
 export interface JmapSession {
   apiUrl: string;
@@ -163,7 +164,7 @@ export class JmapClient {
 
   async getEmailById(id: string): Promise<any> {
     const session = await this.getSession();
-    
+
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
       methodCalls: [
@@ -189,8 +190,47 @@ export class JmapClient {
     if (!email) {
       throw new Error(`Email with ID '${id}' not found or not accessible`);
     }
-    
-    return email;
+
+    const body = this.extractEmailBody(email);
+
+    return {
+      id: email.id,
+      subject: email.subject,
+      from: email.from,
+      to: email.to,
+      cc: email.cc,
+      bcc: email.bcc,
+      receivedAt: email.receivedAt,
+      body,
+      attachments: email.attachments,
+      messageId: email.messageId,
+      threadId: email.threadId,
+      inReplyTo: email.inReplyTo,
+      references: email.references,
+    };
+  }
+
+  private extractEmailBody(email: any): string {
+    const bodyValues = email.bodyValues ?? {};
+
+    // Prefer HTML body — richer formatting and links
+    if (email.htmlBody?.length) {
+      const partId = email.htmlBody[0].partId;
+      const html = bodyValues[partId]?.value;
+      if (html) {
+        const td = new TurndownService({ headingStyle: 'atx', bulletListMarker: '-' });
+        return td.turndown(html);
+      }
+    }
+
+    // Fall back to plain text
+    if (email.textBody?.length) {
+      const partId = email.textBody[0].partId;
+      const text = bodyValues[partId]?.value;
+      if (text) return text;
+    }
+
+    return '';
   }
 
   async getIdentities(): Promise<any[]> {
