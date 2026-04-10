@@ -6,6 +6,7 @@ import {
   formatICalDate,
   parseCalendarObject,
   expandRecurringEvent,
+  isoToICalCompact,
 } from './caldav-client.js';
 
 describe('extractVEvent', () => {
@@ -337,5 +338,24 @@ describe('expandRecurringEvent', () => {
     assert.equal(results.length, 1);
     assert.equal(results[0].start, '2026-03-25');
     assert.equal(results[0].end, '2026-03-26');
+  });
+});
+
+describe('isoToICalCompact', () => {
+  it('converts all-day date', () => {
+    assert.equal(isoToICalCompact('2026-04-10'), '20260410');
+  });
+
+  it('converts UTC datetime', () => {
+    assert.equal(isoToICalCompact('2026-04-10T14:00:00Z'), '20260410T140000Z');
+  });
+
+  it('converts datetime with offset by normalising to UTC', () => {
+    // +02:00 offset → 12:00 UTC
+    assert.equal(isoToICalCompact('2026-04-10T14:00:00+02:00'), '20260410T120000Z');
+  });
+
+  it('strips milliseconds', () => {
+    assert.equal(isoToICalCompact('2026-04-10T14:00:00.000Z'), '20260410T140000Z');
   });
 });

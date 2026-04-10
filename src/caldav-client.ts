@@ -234,6 +234,21 @@ function toICalDateTime(dateTimeStr: string): string {
   return dateTimeStr.replace(/[-:]/g, '');
 }
 
+/**
+ * Convert an ISO 8601 date/datetime string to compact iCalendar format for use in EXDATE.
+ * YYYY-MM-DD → YYYYMMDD, ISO datetime → YYYYMMDDTHHMMSSZ (UTC)
+ */
+export function isoToICalCompact(iso: string): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    return iso.replace(/-/g, '');
+  }
+  const d = new Date(iso);
+  if (!isNaN(d.getTime())) {
+    return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  }
+  return iso.replace(/[-:]/g, '');
+}
+
 export class CalDAVCalendarClient {
   private config: CalDAVConfig;
   private client: DAVClient | null = null;
@@ -340,6 +355,132 @@ export class CalDAVCalendarClient {
     }
 
     return null;
+  }
+
+  private async findCalendarObjectById(eventId: string): Promise<{ obj: DAVCalendarObject; cal: DAVCalendar } | null> {
+    const client = await this.getClient();
+    if (!this.calendars) {
+      this.calendars = await client.fetchCalendars();
+    }
+    for (const cal of this.calendars) {
+      const objects = await client.fetchCalendarObjects({ calendar: cal });
+      for (const obj of objects) {
+        const vevent = extractVEvent(obj.data || '');
+        const uid = parseICalValue(vevent, 'UID');
+        if (uid === eventId || obj.url === eventId) {
+          return { obj, cal };
+        }
+      }
+    }
+    return null;
+  }
+
+  async deleteCalendarEvent(eventId: string, scope: 'this' | 'all', instanceStart?: string): Promise<void> {
+    const client = await this.getClient();
+    const found = await this.findCalendarObjectById(eventId);
+    if (!found) {
+      throw new Error(`Calendar event not found: ${eventId}`);
+    }
+    const { obj } = found;
+
+    if (scope === 'all') {
+      await client.deleteCalendarObject({ calendarObject: obj });
+    } else {
+      if (!instanceStart) {
+        throw new Error('instanceStart is required when scope is "this"');
+      }
+      const exdateValue = isoToICalCompact(instanceStart);
+      const newData = (obj.data || '').replace(
+        /END:VEVENT/,
+        `EXDATE:${exdateValue}\r\nEND:VEVENT`
+      );
+      await client.updateCalendarObject({ calendarObject: { ...obj, data: newData } });
+    }
+  }
+
+  async moveCalendarEvent(eventId: string, targetCalendarId: string, scope: 'this' | 'all', instanceStart?: string): Promise<void> {
+    const client = await this.getClient();
+    if (!this.calendars) {
+      this.calendars = await client.fetchCalendars();
+    }
+
+    const targetCal = this.calendars.find(
+      c => c.url === targetCalendarId || c.displayName === targetCalendarId
+    );
+    if (!targetCal) {
+      throw new Error(`Target calendar not found: ${targetCalendarId}`);
+    }
+
+    const found = await this.findCalendarObjectById(eventId);
+    if (!found) {
+      throw new Error(`Calendar event not found: ${eventId}`);
+    }
+    const { obj } = found;
+
+    if (scope === 'all') {
+      const filename = obj.url.split('/').pop() || `${eventId}.ics`;
+      await client.createCalendarObject({
+        calendar: targetCal,
+        filename,
+        iCalString: obj.data || '',
+      });
+      await client.deleteCalendarObject({ calendarObject: obj });
+    } else {
+      if (!instanceStart) {
+        throw new Error('instanceStart is required when scope is "this"');
+      }
+
+      // Compute occurrence end time from master event duration
+      const vevent = extractVEvent(obj.data || '');
+      const rawStart = parseICalValue(vevent, 'DTSTART');
+      const rawEnd = parseICalValue(vevent, 'DTEND');
+      let durationMs = 0;
+      if (rawStart && rawEnd) {
+        const masterStart = parseICalDateToDate(rawStart.replace(/\r/g, ''));
+        const masterEnd = parseICalDateToDate(rawEnd.replace(/\r/g, ''));
+        if (masterStart && masterEnd) {
+          durationMs = masterEnd.getTime() - masterStart.getTime();
+        }
+      }
+      const occStart = new Date(instanceStart);
+      const occEnd = durationMs > 0 ? new Date(occStart.getTime() + durationMs) : occStart;
+
+      const uid = `${Date.now()}-${Math.random().toString(36).slice(2)}@fastmail-mcp`;
+      const now = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+      const summary = parseICalValue(vevent, 'SUMMARY') || 'Untitled';
+      const description = parseICalValue(vevent, 'DESCRIPTION');
+      const location = parseICalValue(vevent, 'LOCATION');
+
+      const newIcal = [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//fastmail-mcp//CalDAV//EN',
+        'BEGIN:VEVENT',
+        `UID:${uid}`,
+        `DTSTAMP:${now}`,
+        `DTSTART:${toICalDateTime(instanceStart)}`,
+        `DTEND:${toICalDateTime(occEnd.toISOString())}`,
+        `SUMMARY:${summary}`,
+        description ? `DESCRIPTION:${description}` : '',
+        location ? `LOCATION:${location}` : '',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].filter(Boolean).join('\r\n');
+
+      await client.createCalendarObject({
+        calendar: targetCal,
+        filename: `${uid}.ics`,
+        iCalString: newIcal,
+      });
+
+      // Exclude the occurrence from the source event
+      const exdateValue = isoToICalCompact(instanceStart);
+      const newData = (obj.data || '').replace(
+        /END:VEVENT/,
+        `EXDATE:${exdateValue}\r\nEND:VEVENT`
+      );
+      await client.updateCalendarObject({ calendarObject: { ...obj, data: newData } });
+    }
   }
 
   async createCalendarEvent(event: {

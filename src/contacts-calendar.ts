@@ -210,6 +210,149 @@ export class ContactsCalendarClient extends JmapClient {
     }
   }
 
+  async deleteCalendarEvent(eventId: string, scope: 'this' | 'all', instanceStart?: string): Promise<void> {
+    const hasPermission = await this.checkCalendarsPermission();
+    if (!hasPermission) {
+      throw new Error('Calendar access not available. This account may not have JMAP calendar permissions enabled.');
+    }
+    const session = await this.getSession();
+
+    if (scope === 'all') {
+      const request: JmapRequest = {
+        using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:calendars'],
+        methodCalls: [
+          ['CalendarEvent/set', {
+            accountId: session.accountId,
+            destroy: [eventId],
+          }, 'deleteEvent'],
+        ],
+      };
+      const response = await this.makeRequest(request);
+      const result = this.getMethodResult(response, 0);
+      if (result.notDestroyed?.[eventId]) {
+        throw new Error(`Failed to delete event: ${JSON.stringify(result.notDestroyed[eventId])}`);
+      }
+    } else {
+      if (!instanceStart) {
+        throw new Error('instanceStart is required when scope is "this"');
+      }
+      // JMAP recurrenceId is LocalDateTime (YYYY-MM-DDTHH:MM:SS, no Z)
+      const recurrenceId = instanceStart.replace(/Z$/, '').substring(0, 19);
+      const request: JmapRequest = {
+        using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:calendars'],
+        methodCalls: [
+          ['CalendarEvent/set', {
+            accountId: session.accountId,
+            update: {
+              [eventId]: {
+                [`recurrenceOverrides/${recurrenceId}`]: { excluded: true },
+              },
+            },
+          }, 'updateEvent'],
+        ],
+      };
+      const response = await this.makeRequest(request);
+      const result = this.getMethodResult(response, 0);
+      if (result.notUpdated?.[eventId]) {
+        throw new Error(`Failed to exclude occurrence: ${JSON.stringify(result.notUpdated[eventId])}`);
+      }
+    }
+  }
+
+  async moveCalendarEvent(eventId: string, targetCalendarId: string, scope: 'this' | 'all', instanceStart?: string): Promise<void> {
+    const hasPermission = await this.checkCalendarsPermission();
+    if (!hasPermission) {
+      throw new Error('Calendar access not available. This account may not have JMAP calendar permissions enabled.');
+    }
+    const session = await this.getSession();
+
+    if (scope === 'all') {
+      const request: JmapRequest = {
+        using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:calendars'],
+        methodCalls: [
+          ['CalendarEvent/set', {
+            accountId: session.accountId,
+            update: {
+              [eventId]: {
+                calendarIds: { [targetCalendarId]: true },
+              },
+            },
+          }, 'moveEvent'],
+        ],
+      };
+      const response = await this.makeRequest(request);
+      const result = this.getMethodResult(response, 0);
+      if (result.notUpdated?.[eventId]) {
+        throw new Error(`Failed to move event: ${JSON.stringify(result.notUpdated[eventId])}`);
+      }
+    } else {
+      if (!instanceStart) {
+        throw new Error('instanceStart is required when scope is "this"');
+      }
+
+      // Fetch source event to get duration
+      const sourceEvent = await this.getCalendarEventById(eventId);
+      if (!sourceEvent) {
+        throw new Error(`Calendar event not found: ${eventId}`);
+      }
+
+      // Compute occurrence end from RFC 8984 duration or start/end
+      let durationMs = 0;
+      if (sourceEvent.duration) {
+        const m = String(sourceEvent.duration).match(
+          /^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/
+        );
+        if (m) {
+          durationMs =
+            (Number(m[1]) || 0) * 365 * 24 * 3600000 +
+            (Number(m[2]) || 0) * 30 * 24 * 3600000 +
+            (Number(m[3]) || 0) * 24 * 3600000 +
+            (Number(m[4]) || 0) * 3600000 +
+            (Number(m[5]) || 0) * 60000 +
+            (Number(m[6]) || 0) * 1000;
+        }
+      } else if (sourceEvent.start && sourceEvent.end) {
+        durationMs = new Date(sourceEvent.end).getTime() - new Date(sourceEvent.start).getTime();
+      }
+
+      const occStartLocal = instanceStart.replace(/Z$/, '').substring(0, 19);
+      const occEndDate = new Date(new Date(instanceStart).getTime() + durationMs);
+      const occEndLocal = occEndDate.toISOString().replace(/Z$/, '').substring(0, 19);
+
+      const recurrenceId = occStartLocal;
+
+      // Create detached occurrence in target calendar and exclude from source in one batch
+      const request: JmapRequest = {
+        using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:calendars'],
+        methodCalls: [
+          ['CalendarEvent/set', {
+            accountId: session.accountId,
+            create: {
+              newOccurrence: {
+                calendarIds: { [targetCalendarId]: true },
+                title: sourceEvent.title,
+                description: sourceEvent.description,
+                start: occStartLocal,
+                end: occEndLocal,
+                location: sourceEvent.location,
+              },
+            },
+            update: {
+              [eventId]: {
+                [`recurrenceOverrides/${recurrenceId}`]: { excluded: true },
+              },
+            },
+          }, 'moveOccurrence'],
+        ],
+      };
+      const response = await this.makeRequest(request);
+      const result = this.getMethodResult(response, 0);
+      if (result.notUpdated?.[eventId]) {
+        throw new Error(`Failed to exclude occurrence from source: ${JSON.stringify(result.notUpdated[eventId])}`);
+      }
+    }
+  }
+
   async createCalendarEvent(event: {
     calendarId: string;
     title: string;

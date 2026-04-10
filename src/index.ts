@@ -526,6 +526,56 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'delete_calendar_event',
+        description: 'Delete a calendar event. For recurring events, specify whether to delete just this occurrence or the entire series.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            eventId: {
+              type: 'string',
+              description: 'ID of the event to delete',
+            },
+            scope: {
+              type: 'string',
+              enum: ['this', 'all'],
+              description: '"this" to delete only the specified occurrence of a recurring event; "all" to delete the entire event or series',
+            },
+            instanceStart: {
+              type: 'string',
+              description: 'ISO 8601 start time of the specific occurrence to delete (required when scope is "this")',
+            },
+          },
+          required: ['eventId', 'scope'],
+        },
+      },
+      {
+        name: 'move_calendar_event',
+        description: 'Move a calendar event to a different calendar. For recurring events, specify whether to move just this occurrence or the entire series.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            eventId: {
+              type: 'string',
+              description: 'ID of the event to move',
+            },
+            targetCalendarId: {
+              type: 'string',
+              description: 'ID of the target calendar',
+            },
+            scope: {
+              type: 'string',
+              enum: ['this', 'all'],
+              description: '"this" to move only the specified occurrence of a recurring event; "all" to move the entire event or series',
+            },
+            instanceStart: {
+              type: 'string',
+              description: 'ISO 8601 start time of the specific occurrence to move (required when scope is "this")',
+            },
+          },
+          required: ['eventId', 'targetCalendarId', 'scope'],
+        },
+      },
+      {
         name: 'list_identities',
         description: 'List sending identities (email addresses that can be used for sending)',
         inputSchema: {
@@ -1306,6 +1356,50 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             calendarId, title, description, start, end, location,
           });
           return { content: [{ type: 'text', text: `Calendar event created via CalDAV. Event ID: ${eventId}` }] };
+        }
+      }
+
+      case 'delete_calendar_event': {
+        const { eventId, scope, instanceStart } = args as any;
+        if (!eventId || !scope) {
+          throw new McpError(ErrorCode.InvalidParams, 'eventId and scope are required');
+        }
+        if (scope === 'this' && !instanceStart) {
+          throw new McpError(ErrorCode.InvalidParams, 'instanceStart is required when scope is "this"');
+        }
+        try {
+          const contactsClient = initializeContactsCalendarClient();
+          await contactsClient.deleteCalendarEvent(eventId, scope, instanceStart);
+          return { content: [{ type: 'text', text: `Calendar event deleted successfully` }] };
+        } catch {
+          const davClient = initializeCalDAVClient();
+          if (!davClient) {
+            throw new McpError(ErrorCode.InvalidRequest, 'JMAP calendars not available and CalDAV not configured.');
+          }
+          await davClient.deleteCalendarEvent(eventId, scope, instanceStart);
+          return { content: [{ type: 'text', text: `Calendar event deleted successfully` }] };
+        }
+      }
+
+      case 'move_calendar_event': {
+        const { eventId, targetCalendarId, scope, instanceStart } = args as any;
+        if (!eventId || !targetCalendarId || !scope) {
+          throw new McpError(ErrorCode.InvalidParams, 'eventId, targetCalendarId, and scope are required');
+        }
+        if (scope === 'this' && !instanceStart) {
+          throw new McpError(ErrorCode.InvalidParams, 'instanceStart is required when scope is "this"');
+        }
+        try {
+          const contactsClient = initializeContactsCalendarClient();
+          await contactsClient.moveCalendarEvent(eventId, targetCalendarId, scope, instanceStart);
+          return { content: [{ type: 'text', text: `Calendar event moved successfully` }] };
+        } catch {
+          const davClient = initializeCalDAVClient();
+          if (!davClient) {
+            throw new McpError(ErrorCode.InvalidRequest, 'JMAP calendars not available and CalDAV not configured.');
+          }
+          await davClient.moveCalendarEvent(eventId, targetCalendarId, scope, instanceStart);
+          return { content: [{ type: 'text', text: `Calendar event moved successfully` }] };
         }
       }
 
