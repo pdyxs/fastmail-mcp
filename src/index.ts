@@ -154,6 +154,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'get_emails',
+        description: 'Batch-fetch multiple emails by ID in a single call. Prefer this over looping get_email when you need more than one.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            emailIds: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'IDs of the emails to retrieve. Missing IDs are silently omitted from the response.',
+            },
+          },
+          required: ['emailIds'],
+        },
+      },
+      {
         name: 'send_email',
         description: 'Send an email',
         inputSchema: {
@@ -488,7 +503,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             calendarId: {
               type: 'string',
-              description: 'ID of the calendar to create the event in',
+              description: 'Calendar to create the event in. Accepts a JMAP calendar ID, a calendar name (case-insensitive, e.g. "Paul"), or a CalDAV URL. Prefer the name.',
             },
             title: {
               type: 'string',
@@ -500,11 +515,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             start: {
               type: 'string',
-              description: 'Start time in ISO 8601 format',
+              description: 'Start time. Accepts bare local (2026-03-25T14:00), ISO with Z (2026-03-25T03:00:00Z), ISO with offset (2026-03-25T14:00:00+11:00), or all-day date (2026-03-25). Bare local is interpreted in FASTMAIL_TIMEZONE (default: system timezone).',
             },
             end: {
               type: 'string',
-              description: 'End time in ISO 8601 format',
+              description: 'End time. Same formats as start.',
             },
             location: {
               type: 'string',
@@ -521,8 +536,43 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               },
               description: 'Event participants (optional)',
             },
+            timezone: {
+              type: 'string',
+              description: 'IANA timezone name used to interpret bare-local start/end (e.g. "Australia/Sydney"). Optional — defaults to FASTMAIL_TIMEZONE env var, then system timezone. Ignored for inputs that already specify UTC (Z) or an offset.',
+            },
           },
           required: ['calendarId', 'title', 'start', 'end'],
+        },
+      },
+      {
+        name: 'find_duplicate_event',
+        description: 'Check whether a calendar event with a similar title already exists within the given date window. Use before create_calendar_event to avoid duplicates from email re-processing or overlapping triage flows.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            title: {
+              type: 'string',
+              description: 'Event title to match (case-insensitive, substring match).',
+            },
+            start: {
+              type: 'string',
+              description: 'Start time of the proposed event. Same formats as create_calendar_event.',
+            },
+            end: {
+              type: 'string',
+              description: 'End time (optional). Defaults to start.',
+            },
+            calendarNames: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Calendar names or IDs to search. Omit to search all calendars.',
+            },
+            timezone: {
+              type: 'string',
+              description: 'IANA timezone for bare-local start/end (defaults to FASTMAIL_TIMEZONE then system).',
+            },
+          },
+          required: ['title', 'start'],
         },
       },
       {
@@ -782,11 +832,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             mailboxId: {
               type: 'string',
-              description: 'Search within specific mailbox',
+              description: 'Search within a specific mailbox. Accepts a JMAP mailbox ID, a name (case-insensitive, e.g. "Fleet"), or a role ("inbox", "archive"). Prefer the name.',
             },
             after: {
               type: 'string',
-              description: 'Emails after this date (ISO 8601)',
+              description: 'Emails after this date (ISO 8601). Raw — does not compensate for Fastmail search index lag. Prefer `since` unless you specifically need exact boundary semantics.',
+            },
+            since: {
+              type: 'string',
+              description: 'Emails since this timestamp (ISO 8601). Internally subtracts 2 hours to work around Fastmail search index lag, so recent emails are not missed when paging forward by a `last_run` marker. This is the right choice for incremental syncs.',
             },
             before: {
               type: 'string',
@@ -1025,6 +1079,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text: JSON.stringify(email, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'get_emails': {
+        const { emailIds } = args as any;
+        if (!emailIds || !Array.isArray(emailIds) || emailIds.length === 0) {
+          throw new McpError(ErrorCode.InvalidParams, 'emailIds must be a non-empty array');
+        }
+        const emails = await client.getEmailsByIds(emailIds);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(emails, null, 2),
             },
           ],
         };
@@ -1336,15 +1406,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
+      case 'find_duplicate_event': {
+        const { title, start, end, calendarNames, timezone } = args as any;
+        if (!title || !start) {
+          throw new McpError(ErrorCode.InvalidParams, 'title and start are required');
+        }
+        const contactsClient = initializeContactsCalendarClient();
+        const result = await contactsClient.findDuplicateEvent({ title, start, end, calendarNames, timezone });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+
       case 'create_calendar_event': {
-        const { calendarId, title, description, start, end, location, participants } = args as any;
+        const { calendarId, title, description, start, end, location, participants, timezone } = args as any;
         if (!calendarId || !title || !start || !end) {
           throw new McpError(ErrorCode.InvalidParams, 'calendarId, title, start, and end are required');
         }
         try {
           const contactsClient = initializeContactsCalendarClient();
           const eventId = await contactsClient.createCalendarEvent({
-            calendarId, title, description, start, end, location, participants,
+            calendarId, title, description, start, end, location, participants, timezone,
           });
           return { content: [{ type: 'text', text: `Calendar event created successfully. Event ID: ${eventId}` }] };
         } catch {
@@ -1598,10 +1678,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'advanced_search': {
-        const { query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit } = args as any;
+        const { query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, since, before, limit } = args as any;
         const client = initializeClient();
         const emails = await client.advancedSearch({
-          query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit
+          query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, since, before, limit
         });
         return {
           content: [

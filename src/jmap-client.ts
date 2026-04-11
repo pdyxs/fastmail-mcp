@@ -124,7 +124,7 @@ export class JmapClient {
 
   async getMailboxes(): Promise<any[]> {
     const session = await this.getSession();
-    
+
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
       methodCalls: [
@@ -134,6 +134,48 @@ export class JmapClient {
 
     const response = await this.makeRequest(request);
     return this.getListResult(response, 0);
+  }
+
+  private mailboxCache: Array<{ id: string; name: string; role?: string }> | null = null;
+
+  /**
+   * Resolve a mailbox name or ID to a JMAP mailbox ID. Accepts an existing
+   * ID (passed through), a case-insensitive name match, or a role (e.g.
+   * "inbox", "archive"). Throws on ambiguous or unknown names.
+   */
+  async resolveMailboxId(nameOrId: string): Promise<string> {
+    if (!nameOrId) throw new Error('mailboxId or mailboxName is required');
+
+    if (!this.mailboxCache) {
+      const boxes = await this.getMailboxes();
+      this.mailboxCache = boxes.map((b: any) => ({ id: b.id, name: b.name, role: b.role }));
+    }
+
+    // Exact ID match
+    const byId = this.mailboxCache.find(m => m.id === nameOrId);
+    if (byId) return byId.id;
+
+    const lower = nameOrId.toLowerCase();
+
+    // Role match (inbox, archive, sent, etc.)
+    const byRole = this.mailboxCache.find(m => m.role === lower);
+    if (byRole) return byRole.id;
+
+    // Case-insensitive name match
+    const byName = this.mailboxCache.find(m => m.name.toLowerCase() === lower);
+    if (byName) return byName.id;
+
+    // Partial name match
+    const byPartial = this.mailboxCache.filter(m => m.name.toLowerCase().includes(lower));
+    if (byPartial.length === 1) return byPartial[0].id;
+    if (byPartial.length > 1) {
+      throw new Error(
+        `Ambiguous mailbox name "${nameOrId}" — matches: ${byPartial.map(m => m.name).join(', ')}`
+      );
+    }
+
+    const available = this.mailboxCache.map(m => m.name).slice(0, 20).join(', ');
+    throw new Error(`Mailbox "${nameOrId}" not found. Available: ${available}`);
   }
 
   async getEmails(mailboxId?: string, limit: number = 20): Promise<any[]> {
@@ -195,6 +237,7 @@ export class JmapClient {
 
     return {
       id: email.id,
+      webUrl: `https://app.fastmail.com/mail/email/${email.id}`,
       subject: email.subject,
       from: email.from,
       to: email.to,
@@ -208,6 +251,52 @@ export class JmapClient {
       inReplyTo: email.inReplyTo,
       references: email.references,
     };
+  }
+
+  /**
+   * Batch fetch multiple emails by ID in a single Email/get call.
+   * Returns the same shape as getEmailById, one per ID.
+   * Missing IDs are silently omitted (check the returned array against the
+   * input to find them).
+   */
+  async getEmailsByIds(ids: string[]): Promise<any[]> {
+    if (!ids.length) return [];
+    const session = await this.getSession();
+
+    const request: JmapRequest = {
+      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+      methodCalls: [
+        ['Email/get', {
+          accountId: session.accountId,
+          ids,
+          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'textBody', 'htmlBody', 'attachments', 'bodyValues', 'messageId', 'threadId', 'inReplyTo', 'references'],
+          bodyProperties: ['partId', 'blobId', 'type', 'size'],
+          fetchTextBodyValues: true,
+          fetchHTMLBodyValues: true,
+        }, 'emails']
+      ]
+    };
+
+    const response = await this.makeRequest(request);
+    const result = this.getMethodResult(response, 0);
+    const list = result.list || [];
+
+    return list.map((email: any) => ({
+      id: email.id,
+      webUrl: `https://app.fastmail.com/mail/email/${email.id}`,
+      subject: email.subject,
+      from: email.from,
+      to: email.to,
+      cc: email.cc,
+      bcc: email.bcc,
+      receivedAt: email.receivedAt,
+      body: this.extractEmailBody(email),
+      attachments: email.attachments,
+      messageId: email.messageId,
+      threadId: email.threadId,
+      inReplyTo: email.inReplyTo,
+      references: email.references,
+    }));
   }
 
   private extractEmailBody(email: any): string {
@@ -1148,14 +1237,15 @@ export class JmapClient {
     isPinned?: boolean;
     mailboxId?: string;
     after?: string;
+    since?: string; // Like `after`, but absorbs the 2h Fastmail search-index delay
     before?: string;
     limit?: number;
   }): Promise<any[]> {
     const session = await this.getSession();
-    
+
     // Build JMAP filter object
     const filter: any = {};
-    
+
     if (filters.query) filter.text = filters.query;
     if (filters.from) filter.from = filters.from;
     if (filters.to) filter.to = filters.to;
@@ -1165,8 +1255,19 @@ export class JmapClient {
     else if (filters.isUnread === false) filter.hasKeyword = '$seen';
     if (filters.isPinned === true) filter.hasKeyword = '$flagged';
     if (filters.isPinned === false) filter.notKeyword = '$flagged';
-    if (filters.mailboxId) filter.inMailbox = filters.mailboxId;
+    if (filters.mailboxId) {
+      filter.inMailbox = await this.resolveMailboxId(filters.mailboxId);
+    }
     if (filters.after) filter.after = filters.after;
+    if (filters.since) {
+      // Fastmail's search index lags by up to 2h — subtract to avoid missing
+      // recent emails when paging forward by `last_run` timestamp.
+      const sinceDate = new Date(filters.since);
+      if (isNaN(sinceDate.getTime())) {
+        throw new Error(`Invalid since: ${filters.since}. Expected ISO 8601.`);
+      }
+      filter.after = new Date(sinceDate.getTime() - 2 * 60 * 60 * 1000).toISOString();
+    }
     if (filters.before) filter.before = filters.before;
 
     // When both isUnread and isPinned are set, hasKeyword/notKeyword may conflict.

@@ -1,7 +1,54 @@
 import { JmapClient, JmapRequest } from './jmap-client.js';
+import { defaultTz, normalizeEventDateTime } from './dates.js';
 
 export class ContactsCalendarClient extends JmapClient {
-  
+  private calendarCache: Array<{ id: string; name: string }> | null = null;
+
+  /**
+   * Resolve a calendar name or ID to a JMAP calendar ID.
+   *
+   * Accepts: a JMAP calendar ID (passed through), a calendar name
+   * (case-insensitive lookup), or undefined (returns undefined — caller
+   * decides whether that's an error).
+   *
+   * CalDAV URLs are NOT resolved here — the caller should handle that by
+   * falling through to the CalDAV client.
+   */
+  async resolveCalendarId(nameOrId: string): Promise<string> {
+    if (!nameOrId) throw new Error('calendarId or calendarName is required');
+
+    // CalDAV URLs shouldn't be resolved by this path — the caller handles them.
+    if (nameOrId.startsWith('http://') || nameOrId.startsWith('https://')) {
+      return nameOrId;
+    }
+
+    if (!this.calendarCache) {
+      const cals = await this.getCalendars();
+      this.calendarCache = cals.map((c: any) => ({ id: c.id, name: c.name }));
+    }
+
+    // Exact ID match
+    const byId = this.calendarCache.find(c => c.id === nameOrId);
+    if (byId) return byId.id;
+
+    // Case-insensitive name match
+    const lower = nameOrId.toLowerCase();
+    const byName = this.calendarCache.find(c => c.name.toLowerCase() === lower);
+    if (byName) return byName.id;
+
+    // Partial name match as a last resort
+    const byPartial = this.calendarCache.filter(c => c.name.toLowerCase().includes(lower));
+    if (byPartial.length === 1) return byPartial[0].id;
+    if (byPartial.length > 1) {
+      throw new Error(
+        `Ambiguous calendar name "${nameOrId}" — matches: ${byPartial.map(c => c.name).join(', ')}`
+      );
+    }
+
+    const available = this.calendarCache.map(c => c.name).join(', ');
+    throw new Error(`Calendar "${nameOrId}" not found. Available: ${available}`);
+  }
+
   private async checkContactsPermission(): Promise<boolean> {
     const session = await this.getSession();
     return !!session.capabilities['urn:ietf:params:jmap:contacts'];
@@ -155,8 +202,9 @@ export class ContactsCalendarClient extends JmapClient {
     }
 
     const session = await this.getSession();
-    
-    const filter = calendarId ? { inCalendar: calendarId } : {};
+
+    const resolvedId = calendarId ? await this.resolveCalendarId(calendarId) : undefined;
+    const filter = resolvedId ? { inCalendar: resolvedId } : {};
     
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:calendars'],
@@ -353,14 +401,73 @@ export class ContactsCalendarClient extends JmapClient {
     }
   }
 
+  /**
+   * Find an existing calendar event that looks like a duplicate of the one
+   * about to be created. Use before createCalendarEvent to avoid creating
+   * duplicates from email re-processing or overlapping triage flows.
+   *
+   * Matching is on title (case-insensitive, with substring fallback) within
+   * the event's date window (inclusive). Searches across all provided
+   * calendar names (or all calendars if omitted).
+   */
+  async findDuplicateEvent(params: {
+    title: string;
+    start: string;
+    end?: string;
+    calendarNames?: string[];
+    timezone?: string;
+  }): Promise<{ found: boolean; event: any | null; searched: string[] }> {
+    const tzIfBare = params.timezone || defaultTz();
+    const startNorm = normalizeEventDateTime(params.start, tzIfBare);
+    const endNorm = params.end ? normalizeEventDateTime(params.end, tzIfBare) : startNorm;
+
+    // Date window: allow ±1 day around the start so we catch events with
+    // slightly different times but the same day. Callers doing tighter
+    // matching can pass a narrower end.
+    const windowStart = startNorm.start.slice(0, 10);
+    const windowEnd = endNorm.start.slice(0, 10);
+
+    const titleLower = params.title.trim().toLowerCase();
+    if (!titleLower) throw new Error('title is required for duplicate detection');
+
+    // Resolve which calendars to search
+    let calendarIds: string[];
+    if (params.calendarNames && params.calendarNames.length > 0) {
+      calendarIds = await Promise.all(params.calendarNames.map(n => this.resolveCalendarId(n)));
+    } else {
+      const all = await this.getCalendars();
+      calendarIds = all.map((c: any) => c.id);
+    }
+
+    const searched: string[] = [];
+    for (const calId of calendarIds) {
+      searched.push(calId);
+      const events = await this.getCalendarEvents(calId, 200);
+      for (const ev of events) {
+        const evTitle = (ev.title || '').trim().toLowerCase();
+        if (!evTitle) continue;
+
+        const evStart = (ev.start || '').slice(0, 10);
+        if (evStart < windowStart || evStart > windowEnd) continue;
+
+        if (evTitle === titleLower || evTitle.includes(titleLower) || titleLower.includes(evTitle)) {
+          return { found: true, event: ev, searched };
+        }
+      }
+    }
+
+    return { found: false, event: null, searched };
+  }
+
   async createCalendarEvent(event: {
     calendarId: string;
     title: string;
     description?: string;
-    start: string; // ISO 8601 format
-    end: string;   // ISO 8601 format
+    start: string; // Bare local, ISO with Z, ISO with offset, or YYYY-MM-DD
+    end: string;
     location?: string;
     participants?: Array<{ email: string; name?: string }>;
+    timezone?: string; // Override the default for bare-local inputs
   }): Promise<string> {
     // Check permissions first
     const hasPermission = await this.checkCalendarsPermission();
@@ -370,15 +477,27 @@ export class ContactsCalendarClient extends JmapClient {
 
     const session = await this.getSession();
 
-    const eventObject = {
-      calendarId: event.calendarId,
+    // Resolve calendar name → JMAP calendar ID (pass-through if already an ID).
+    const resolvedCalendarId = await this.resolveCalendarId(event.calendarId);
+
+    // Normalise to RFC 8984 LocalDateTime + timeZone. Fixes the bug where
+    // offset-bearing inputs were passed through raw and silently rejected.
+    const tzIfBare = event.timezone || defaultTz();
+    const startNorm = normalizeEventDateTime(event.start, tzIfBare);
+    const endNorm = normalizeEventDateTime(event.end, tzIfBare);
+
+    const eventObject: Record<string, unknown> = {
+      calendarId: resolvedCalendarId,
       title: event.title,
       description: event.description || '',
-      start: event.start,
-      end: event.end,
+      start: startNorm.start,
+      end: endNorm.start,
       location: event.location || '',
       participants: event.participants || []
     };
+    if (startNorm.timeZone) {
+      eventObject.timeZone = startNorm.timeZone;
+    }
 
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:calendars'],
