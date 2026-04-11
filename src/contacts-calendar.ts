@@ -205,7 +205,7 @@ export class ContactsCalendarClient extends JmapClient {
 
     const resolvedId = calendarId ? await this.resolveCalendarId(calendarId) : undefined;
     const filter = resolvedId ? { inCalendar: resolvedId } : {};
-    
+
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:calendars'],
       methodCalls: [
@@ -218,17 +218,42 @@ export class ContactsCalendarClient extends JmapClient {
         ['CalendarEvent/get', {
           accountId: session.accountId,
           '#ids': { resultOf: 'query', name: 'CalendarEvent/query', path: '/ids' },
-          properties: ['id', 'title', 'description', 'start', 'end', 'location', 'participants']
+          properties: ['id', 'title', 'description', 'start', 'end', 'location', 'participants', 'calendarIds', 'recurrenceRules', 'recurrenceOverrides']
         }, 'events']
       ]
     };
 
     try {
       const response = await this.makeRequest(request);
-      return this.getListResult(response, 1);
+      const events = this.getListResult(response, 1);
+      return this.annotateCalendarNames(events);
     } catch (error) {
       throw new Error(`Calendar events access not supported: ${error instanceof Error ? error.message : String(error)}. Try checking account permissions or enabling calendar API access in Fastmail settings.`);
     }
+  }
+
+  /**
+   * Populate each event with `calendarName` using its `calendarIds` map.
+   * Callers shouldn't have to maintain their own ID-to-name table. If multiple
+   * calendars are set, picks the first one (matches how Fastmail displays it).
+   */
+  private async annotateCalendarNames(events: any[]): Promise<any[]> {
+    if (!events || events.length === 0) return events;
+    if (!this.calendarCache) {
+      const cals = await this.getCalendars();
+      this.calendarCache = cals.map((c: any) => ({ id: c.id, name: c.name }));
+    }
+    const nameById = new Map(this.calendarCache.map(c => [c.id, c.name]));
+    return events.map((ev: any) => {
+      if (ev && ev.calendarIds && typeof ev.calendarIds === 'object') {
+        const ids = Object.keys(ev.calendarIds).filter(k => ev.calendarIds[k]);
+        const primary = ids[0];
+        if (primary && nameById.has(primary)) {
+          return { ...ev, calendarName: nameById.get(primary) };
+        }
+      }
+      return ev;
+    });
   }
 
   async getCalendarEventById(id: string): Promise<any> {
@@ -245,14 +270,17 @@ export class ContactsCalendarClient extends JmapClient {
       methodCalls: [
         ['CalendarEvent/get', {
           accountId: session.accountId,
-          ids: [id]
+          ids: [id],
+          properties: ['id', 'title', 'description', 'start', 'end', 'duration', 'location', 'participants', 'calendarIds', 'recurrenceRules', 'recurrenceOverrides']
         }, 'event']
       ]
     };
 
     try {
       const response = await this.makeRequest(request);
-      return this.getListResult(response, 0)[0];
+      const events = this.getListResult(response, 0);
+      const annotated = await this.annotateCalendarNames(events);
+      return annotated[0];
     } catch (error) {
       throw new Error(`Calendar event access not supported: ${error instanceof Error ? error.message : String(error)}. Try checking account permissions or enabling calendar API access in Fastmail settings.`);
     }

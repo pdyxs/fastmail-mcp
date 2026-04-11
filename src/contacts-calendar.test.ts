@@ -201,3 +201,50 @@ describe('moveCalendarEvent – scope "this"', () => {
     );
   });
 });
+
+// ---------- getCalendarEvents – calendarName annotation (M12) ----------
+
+describe('getCalendarEvents – annotates calendarName', () => {
+  let client: ContactsCalendarClient;
+
+  beforeEach(() => { client = makeClient(); });
+
+  it('populates calendarName using the primary calendarIds entry', async () => {
+    // Seed calendar cache via getCalendars mock (used by annotateCalendarNames).
+    mock.method(client, 'getCalendars', async () => [
+      { id: 'cal-paul', name: 'Paul' },
+      { id: 'cal-julie', name: 'Julie' },
+    ]);
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['CalendarEvent/query', { ids: ['e1', 'e2'] }, 'query'],
+        ['CalendarEvent/get', {
+          list: [
+            { id: 'e1', title: 'Paul Event', calendarIds: { 'cal-paul': true } },
+            { id: 'e2', title: 'Julie Event', calendarIds: { 'cal-julie': true } },
+          ],
+        }, 'events'],
+      ],
+    });
+
+    const events = await client.getCalendarEvents();
+    assert.equal(events.length, 2);
+    assert.equal(events[0].calendarName, 'Paul');
+    assert.equal(events[1].calendarName, 'Julie');
+  });
+
+  it('leaves calendarName undefined when calendarIds empty / unknown', async () => {
+    mock.method(client, 'getCalendars', async () => [{ id: 'cal-paul', name: 'Paul' }]);
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['CalendarEvent/query', { ids: ['e1'] }, 'query'],
+        ['CalendarEvent/get', {
+          list: [{ id: 'e1', title: 'Orphan', calendarIds: { 'cal-missing': true } }],
+        }, 'events'],
+      ],
+    });
+
+    const events = await client.getCalendarEvents();
+    assert.equal(events[0].calendarName, undefined);
+  });
+});

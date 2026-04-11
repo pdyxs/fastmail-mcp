@@ -208,6 +208,39 @@ describe('parseCalendarObject', () => {
     assert.equal(event.title, 'Untitled');
   });
 
+  it('flags isRecurring when RRULE is present (M13 support)', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:weekly@fastmail',
+      'DTSTART:20260320T083000Z',
+      'DTEND:20260320T093000Z',
+      'SUMMARY:Weekly Standup',
+      'RRULE:FREQ=WEEKLY;BYDAY=FR',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+
+    const event = parseCalendarObject({ data, url: '' });
+    assert.equal(event.isRecurring, true);
+  });
+
+  it('leaves isRecurring false when no RRULE', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:once@fastmail',
+      'DTSTART:20260320T083000Z',
+      'DTEND:20260320T093000Z',
+      'SUMMARY:One-off',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+
+    const event = parseCalendarObject({ data, url: '' });
+    assert.equal(event.isRecurring, false);
+  });
+
   it('handles missing optional fields', () => {
     const data = [
       'BEGIN:VCALENDAR',

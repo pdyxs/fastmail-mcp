@@ -29,6 +29,8 @@ export interface CalendarEvent {
   start?: string;
   end?: string;
   location?: string;
+  isRecurring?: boolean;
+  calendarName?: string;
 }
 
 /**
@@ -108,6 +110,8 @@ export function parseCalendarObject(obj: DAVCalendarObject): CalendarEvent {
   const location = parseICalValue(vevent, 'LOCATION');
   const uid = parseICalValue(vevent, 'UID') || obj.url || '';
 
+  const isRecurring = !!parseICalValue(vevent, 'RRULE');
+
   return {
     id: uid,
     url: obj.url || '',
@@ -116,6 +120,7 @@ export function parseCalendarObject(obj: DAVCalendarObject): CalendarEvent {
     start: formatICalDate(rawStart),
     end: formatICalDate(rawEnd),
     location: location?.replace(/\\,/g, ',') || undefined,
+    isRecurring,
   };
 }
 
@@ -317,17 +322,22 @@ export class CalDAVCalendarClient {
 
     const allEvents: CalendarEvent[] = [];
     for (const cal of targetCalendars) {
+      const calName = String((cal as any).displayName || 'Unnamed');
       const objects = await client.fetchCalendarObjects({ ...fetchOptions, calendar: cal });
       for (const obj of objects) {
+        let produced: CalendarEvent[];
         if (timeMin || timeMax) {
-          const expanded = expandRecurringEvent(
+          produced = expandRecurringEvent(
             obj,
             timeMin || '1970-01-01T00:00:00Z',
             timeMax || '2099-12-31T23:59:59Z',
           );
-          allEvents.push(...expanded);
         } else {
-          allEvents.push(parseCalendarObject(obj));
+          produced = [parseCalendarObject(obj)];
+        }
+        for (const ev of produced) {
+          (ev as any).calendarName = calName;
+          allEvents.push(ev);
         }
       }
       if (allEvents.length >= limit) break;

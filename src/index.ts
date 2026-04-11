@@ -577,7 +577,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'delete_calendar_event',
-        description: 'Delete a calendar event. For recurring events, specify whether to delete just this occurrence or the entire series.',
+        description: 'Delete a calendar event. `scope` and `instanceStart` are both optional: if omitted, the MCP fetches the event and picks sensible defaults — `all` for non-recurring events, `this` for recurring events (with `instanceStart` inferred from the event\'s start). Override either explicitly when you need the other behaviour (e.g. scope="all" on a recurring event to delete the whole series).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -588,19 +588,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             scope: {
               type: 'string',
               enum: ['this', 'all'],
-              description: '"this" to delete only the specified occurrence of a recurring event; "all" to delete the entire event or series',
+              description: 'Optional. "this" to delete only the specified occurrence; "all" to delete the whole event/series. Auto-detected when omitted.',
             },
             instanceStart: {
               type: 'string',
-              description: 'ISO 8601 start time of the specific occurrence to delete (required when scope is "this")',
+              description: 'Optional. ISO 8601 start time of the occurrence to delete. Inferred from the event when scope is "this" and this is omitted.',
             },
           },
-          required: ['eventId', 'scope'],
+          required: ['eventId'],
         },
       },
       {
         name: 'move_calendar_event',
-        description: 'Move a calendar event to a different calendar. For recurring events, specify whether to move just this occurrence or the entire series.',
+        description: 'Move a calendar event to a different calendar. `scope` and `instanceStart` are both optional: if omitted, the MCP fetches the event and picks sensible defaults — `all` for non-recurring events, `this` for recurring events (with `instanceStart` inferred from the event\'s start). Override either explicitly when you need the other behaviour.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -610,19 +610,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             targetCalendarId: {
               type: 'string',
-              description: 'ID of the target calendar',
+              description: 'ID of the target calendar (accepts calendar name or JMAP ID)',
             },
             scope: {
               type: 'string',
               enum: ['this', 'all'],
-              description: '"this" to move only the specified occurrence of a recurring event; "all" to move the entire event or series',
+              description: 'Optional. "this" to move only the specified occurrence; "all" to move the whole event/series. Auto-detected when omitted.',
             },
             instanceStart: {
               type: 'string',
-              description: 'ISO 8601 start time of the specific occurrence to move (required when scope is "this")',
+              description: 'Optional. ISO 8601 start time of the occurrence to move. Inferred from the event when scope is "this" and this is omitted.',
             },
           },
-          required: ['eventId', 'targetCalendarId', 'scope'],
+          required: ['eventId', 'targetCalendarId'],
         },
       },
       {
@@ -1411,9 +1411,59 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!title || !start) {
           throw new McpError(ErrorCode.InvalidParams, 'title and start are required');
         }
-        const contactsClient = initializeContactsCalendarClient();
-        const result = await contactsClient.findDuplicateEvent({ title, start, end, calendarNames, timezone });
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        try {
+          const contactsClient = initializeContactsCalendarClient();
+          const result = await contactsClient.findDuplicateEvent({ title, start, end, calendarNames, timezone });
+          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        } catch {
+          const davClient = initializeCalDAVClient();
+          if (!davClient) {
+            throw new McpError(ErrorCode.InvalidRequest, 'JMAP calendars not available and CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD to use CalDAV.');
+          }
+          const titleLower = String(title).trim().toLowerCase();
+          if (!titleLower) throw new McpError(ErrorCode.InvalidParams, 'title is required for duplicate detection');
+
+          const startDay = String(start).slice(0, 10);
+          const endDay = end ? String(end).slice(0, 10) : startDay;
+          const addDays = (d: string, delta: number) => {
+            const dt = new Date(d + 'T00:00:00Z');
+            dt.setUTCDate(dt.getUTCDate() + delta);
+            return dt.toISOString().slice(0, 10);
+          };
+          const timeMin = addDays(startDay, -1) + 'T00:00:00Z';
+          const timeMax = addDays(endDay, 1) + 'T23:59:59Z';
+
+          const allCalendars = await davClient.getCalendars();
+          let targetCalendars = allCalendars;
+          if (calendarNames && calendarNames.length > 0) {
+            const wanted = new Set(calendarNames.map((n: string) => n.toLowerCase()));
+            targetCalendars = allCalendars.filter((c: any) =>
+              wanted.has((c.displayName || '').toLowerCase()) ||
+              wanted.has((c.url || '').toLowerCase()) ||
+              wanted.has((c.id || '').toLowerCase())
+            );
+          }
+
+          const searched: string[] = [];
+          for (const cal of targetCalendars) {
+            const calKey = cal.url || cal.id || cal.displayName;
+            searched.push(calKey);
+            const events = await davClient.getCalendarEvents(calKey, 200, timeMin, timeMax);
+            for (const ev of events) {
+              const evTitle = String((ev as any).title || '').trim().toLowerCase();
+              if (!evTitle) continue;
+              const evStart = String((ev as any).start || '').slice(0, 10);
+              if (evStart < startDay || evStart > endDay) {
+                // Allow events within the ±1 window too
+                if (evStart < addDays(startDay, -1) || evStart > addDays(endDay, 1)) continue;
+              }
+              if (evTitle === titleLower || evTitle.includes(titleLower) || titleLower.includes(evTitle)) {
+                return { content: [{ type: 'text', text: JSON.stringify({ found: true, event: ev, searched }, null, 2) }] };
+              }
+            }
+          }
+          return { content: [{ type: 'text', text: JSON.stringify({ found: false, event: null, searched }, null, 2) }] };
+        }
       }
 
       case 'create_calendar_event': {
@@ -1440,46 +1490,71 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'delete_calendar_event': {
-        const { eventId, scope, instanceStart } = args as any;
-        if (!eventId || !scope) {
-          throw new McpError(ErrorCode.InvalidParams, 'eventId and scope are required');
+        let { eventId, scope, instanceStart } = args as any;
+        if (!eventId) {
+          throw new McpError(ErrorCode.InvalidParams, 'eventId is required');
         }
-        if (scope === 'this' && !instanceStart) {
-          throw new McpError(ErrorCode.InvalidParams, 'instanceStart is required when scope is "this"');
-        }
+        const needsInference = !scope || (scope === 'this' && !instanceStart);
         try {
           const contactsClient = initializeContactsCalendarClient();
+          if (needsInference) {
+            const ev = await contactsClient.getCalendarEventById(eventId);
+            if (!ev) throw new McpError(ErrorCode.InvalidParams, `Event not found: ${eventId}`);
+            const isRecurring = !!(ev.recurrenceRules || ev.recurrenceOverrides);
+            if (!scope) scope = isRecurring ? 'this' : 'all';
+            if (scope === 'this' && !instanceStart) instanceStart = ev.start;
+          }
           await contactsClient.deleteCalendarEvent(eventId, scope, instanceStart);
-          return { content: [{ type: 'text', text: `Calendar event deleted successfully` }] };
-        } catch {
+          return { content: [{ type: 'text', text: `Calendar event deleted successfully (scope: ${scope})` }] };
+        } catch (err) {
+          if (err instanceof McpError) throw err;
           const davClient = initializeCalDAVClient();
           if (!davClient) {
             throw new McpError(ErrorCode.InvalidRequest, 'JMAP calendars not available and CalDAV not configured.');
           }
+          if (needsInference) {
+            const ev = await davClient.getCalendarEventById(eventId);
+            if (!ev) throw new McpError(ErrorCode.InvalidParams, `Event not found: ${eventId}`);
+            if (!scope) scope = ev.isRecurring ? 'this' : 'all';
+            if (scope === 'this' && !instanceStart) instanceStart = ev.start;
+          }
           await davClient.deleteCalendarEvent(eventId, scope, instanceStart);
-          return { content: [{ type: 'text', text: `Calendar event deleted successfully` }] };
+          return { content: [{ type: 'text', text: `Calendar event deleted successfully (scope: ${scope})` }] };
         }
       }
 
       case 'move_calendar_event': {
-        const { eventId, targetCalendarId, scope, instanceStart } = args as any;
-        if (!eventId || !targetCalendarId || !scope) {
-          throw new McpError(ErrorCode.InvalidParams, 'eventId, targetCalendarId, and scope are required');
+        let { eventId, targetCalendarId, scope, instanceStart } = args as any;
+        if (!eventId || !targetCalendarId) {
+          throw new McpError(ErrorCode.InvalidParams, 'eventId and targetCalendarId are required');
         }
-        if (scope === 'this' && !instanceStart) {
-          throw new McpError(ErrorCode.InvalidParams, 'instanceStart is required when scope is "this"');
-        }
+        const needsInference = !scope || (scope === 'this' && !instanceStart);
         try {
           const contactsClient = initializeContactsCalendarClient();
-          await contactsClient.moveCalendarEvent(eventId, targetCalendarId, scope, instanceStart);
-          return { content: [{ type: 'text', text: `Calendar event moved successfully` }] };
-        } catch {
+          if (needsInference) {
+            const ev = await contactsClient.getCalendarEventById(eventId);
+            if (!ev) throw new McpError(ErrorCode.InvalidParams, `Event not found: ${eventId}`);
+            const isRecurring = !!(ev.recurrenceRules || ev.recurrenceOverrides);
+            if (!scope) scope = isRecurring ? 'this' : 'all';
+            if (scope === 'this' && !instanceStart) instanceStart = ev.start;
+          }
+          const resolvedTarget = await contactsClient.resolveCalendarId(targetCalendarId);
+          await contactsClient.moveCalendarEvent(eventId, resolvedTarget, scope, instanceStart);
+          return { content: [{ type: 'text', text: `Calendar event moved successfully (scope: ${scope})` }] };
+        } catch (err) {
+          if (err instanceof McpError) throw err;
           const davClient = initializeCalDAVClient();
           if (!davClient) {
             throw new McpError(ErrorCode.InvalidRequest, 'JMAP calendars not available and CalDAV not configured.');
           }
+          if (needsInference) {
+            const ev = await davClient.getCalendarEventById(eventId);
+            if (!ev) throw new McpError(ErrorCode.InvalidParams, `Event not found: ${eventId}`);
+            if (!scope) scope = ev.isRecurring ? 'this' : 'all';
+            if (scope === 'this' && !instanceStart) instanceStart = ev.start;
+          }
           await davClient.moveCalendarEvent(eventId, targetCalendarId, scope, instanceStart);
-          return { content: [{ type: 'text', text: `Calendar event moved successfully` }] };
+          return { content: [{ type: 'text', text: `Calendar event moved successfully (scope: ${scope})` }] };
         }
       }
 
