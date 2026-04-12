@@ -626,14 +626,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
-        name: 'list_identities',
-        description: 'List sending identities (email addresses that can be used for sending)',
-        inputSchema: {
-          type: 'object',
-          properties: {},
-        },
-      },
-      {
         name: 'get_recent_emails',
         description: 'Get the most recent emails from inbox (like top-ten)',
         inputSchema: {
@@ -758,42 +750,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ['emailId', 'mailboxIds'],
-        },
-      },
-      {
-        name: 'get_email_attachments',
-        description: 'Get list of attachments for an email',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            emailId: {
-              type: 'string',
-              description: 'ID of the email',
-            },
-          },
-          required: ['emailId'],
-        },
-      },
-      {
-        name: 'download_attachment',
-        description: 'Download an email attachment. If savePath is provided, saves the file to disk and returns the file path and size. Otherwise returns a download URL.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            emailId: {
-              type: 'string',
-              description: 'ID of the email',
-            },
-            attachmentId: {
-              type: 'string',
-              description: 'ID of the attachment',
-            },
-            savePath: {
-              type: 'string',
-              description: 'File path within ~/Downloads/fastmail-mcp/ to save the attachment to. Paths outside this directory are rejected for security. Parent directories will be created automatically.',
-            },
-          },
-          required: ['emailId', 'attachmentId'],
         },
       },
       {
@@ -1001,33 +957,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ['emailIds', 'mailboxIds'],
-        },
-      },
-      {
-        name: 'check_function_availability',
-        description: 'Check which MCP functions are available based on account permissions',
-        inputSchema: {
-          type: 'object',
-          properties: {},
-        },
-      },
-      {
-        name: 'test_bulk_operations',
-        description: 'Test bulk operations by finding recent emails and performing safe operations (mark read/unread)',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            dryRun: {
-              type: 'boolean',
-              description: 'If true, only shows what would be done without making changes (default: true)',
-              default: true,
-            },
-            limit: {
-              type: 'number',
-              description: 'Number of emails to test with (default: 3, max: 10)',
-              default: 3,
-            },
-          },
         },
       },
     ],
@@ -1558,20 +1487,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
-      case 'list_identities': {
-        const client = initializeClient();
-        const identities = await client.getIdentities();
-        
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(identities, null, 2),
-            },
-          ],
-        };
-      }
-
       case 'get_recent_emails': {
         const { limit = 10, mailboxName = 'inbox' } = args as any;
         const client = initializeClient();
@@ -1694,63 +1609,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case 'get_email_attachments': {
-        const { emailId } = args as any;
-        if (!emailId) {
-          throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
-        }
-        const client = initializeClient();
-        const attachments = await client.getEmailAttachments(emailId);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(attachments, null, 2),
-            },
-          ],
-        };
-      }
-
-      case 'download_attachment': {
-        const { emailId, attachmentId, savePath } = args as any;
-        if (!emailId || !attachmentId) {
-          throw new McpError(ErrorCode.InvalidParams, 'emailId and attachmentId are required');
-        }
-        const client = initializeClient();
-        try {
-          if (savePath) {
-            const result = await client.downloadAttachmentToFile(emailId, attachmentId, savePath);
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: `Saved to: ${savePath} (${result.bytesWritten} bytes)`,
-                },
-              ],
-            };
-          } else {
-            const downloadUrl = await client.downloadAttachment(emailId, attachmentId);
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: `Download URL: ${downloadUrl}`,
-                },
-              ],
-            };
-          }
-        } catch (error) {
-          // Let path validation errors through so users see why their savePath was rejected
-          if (error instanceof Error && (error.message.includes('Save path') || error.message.includes('null bytes'))) {
-            throw new McpError(ErrorCode.InvalidParams, error.message);
-          }
-          // Sanitize other errors to avoid leaking attachment metadata
-          throw new McpError(
-            ErrorCode.InternalError,
-            'Attachment download failed. Verify emailId and attachmentId and try again.'
-          );
-        }
-      }
 
       case 'advanced_search': {
         const { query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, since, before, limit } = args as any;
@@ -1926,164 +1784,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
-      }
-
-      case 'check_function_availability': {
-        const client = initializeClient();
-        const session = await client.getSession();
-        
-        const availability = {
-          email: {
-            available: true,
-            functions: [
-              'list_mailboxes', 'list_emails', 'get_email', 'send_email', 'create_draft', 'edit_draft', 'send_draft', 'search_emails',
-              'get_recent_emails', 'mark_email_read', 'pin_email', 'delete_email', 'move_email',
-              'get_email_attachments', 'download_attachment', 'advanced_search', 'get_thread',
-              'get_mailbox_stats', 'get_account_summary', 'bulk_mark_read', 'bulk_pin', 'bulk_move', 'bulk_delete',
-              'add_labels', 'remove_labels', 'bulk_add_labels', 'bulk_remove_labels'
-            ]
-          },
-          identity: {
-            available: true,
-            functions: ['list_identities']
-          },
-          contacts: {
-            available: !!session.capabilities['urn:ietf:params:jmap:contacts'],
-            functions: ['list_contacts', 'get_contact', 'search_contacts'],
-            note: session.capabilities['urn:ietf:params:jmap:contacts'] ? 
-              'Contacts are available' : 
-              'Contacts access not available - may require enabling in Fastmail account settings',
-            enablementGuide: session.capabilities['urn:ietf:params:jmap:contacts'] ? null : {
-              steps: [
-                '1. Log into Fastmail web interface',
-                '2. Go to Settings → Privacy & Security → Connected Apps & API tokens',
-                '3. Check if contacts scope is enabled for your API token',
-                '4. If not available, you may need to upgrade your Fastmail plan or contact support'
-              ],
-              documentation: 'https://www.fastmail.com/help/technical/jmap-api.html'
-            }
-          },
-          calendar: {
-            available: !!session.capabilities['urn:ietf:params:jmap:calendars'],
-            functions: ['list_calendars', 'list_calendar_events', 'get_calendar_event', 'create_calendar_event'],
-            note: session.capabilities['urn:ietf:params:jmap:calendars'] ? 
-              'Calendar is available' : 
-              'Calendar access not available - may require enabling in Fastmail account settings',
-            enablementGuide: session.capabilities['urn:ietf:params:jmap:calendars'] ? null : {
-              steps: [
-                '1. Log into Fastmail web interface',
-                '2. Go to Settings → Privacy & Security → Connected Apps & API tokens',
-                '3. Check if calendar scope is enabled for your API token',
-                '4. If not available, you may need to upgrade your Fastmail plan or contact support'
-              ],
-              documentation: 'https://www.fastmail.com/help/technical/jmap-api.html'
-            }
-          },
-          capabilities: Object.keys(session.capabilities)
-        };
-        
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(availability, null, 2),
-            },
-          ],
-        };
-      }
-
-      case 'test_bulk_operations': {
-        const { dryRun = true, limit = 3 } = args as any;
-        const client = initializeClient();
-        
-        // Get some recent emails to test with
-        const testLimit = Math.min(Math.max(limit, 1), 10);
-        const emails = await client.getRecentEmails(testLimit, 'inbox');
-        
-        if (emails.length === 0) {
-          return {
-            content: [
-              {
-                type: 'text',
-                text: 'No emails found for bulk operation testing. Try sending yourself a test email first.',
-              },
-            ],
-          };
-        }
-        
-        const emailIds = emails.slice(0, testLimit).map(email => email.id);
-        const operations = [
-          {
-            name: 'bulk_mark_read',
-            description: `Mark ${emailIds.length} emails as read`,
-            parameters: { emailIds, read: true }
-          },
-          {
-            name: 'bulk_mark_read (undo)',
-            description: `Mark ${emailIds.length} emails as unread (undo previous)`,
-            parameters: { emailIds, read: false }
-          }
-        ];
-        
-        const results = {
-          testEmails: emails.map(email => ({
-            id: email.id,
-            subject: email.subject,
-            from: email.from?.[0]?.email || 'unknown',
-            receivedAt: email.receivedAt
-          })),
-          operations: [] as any[]
-        };
-        
-        if (dryRun) {
-          results.operations = operations.map(op => ({
-            ...op,
-            status: 'DRY RUN - Would execute but not actually performed',
-            executed: false
-          }));
-          
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `BULK OPERATIONS TEST (DRY RUN)\n\n${JSON.stringify(results, null, 2)}\n\nTo actually execute the test, set dryRun: false`,
-              },
-            ],
-          };
-        } else {
-          // Execute the test operations
-          for (const operation of operations) {
-            try {
-              await client.bulkMarkRead(operation.parameters.emailIds, operation.parameters.read);
-              results.operations.push({
-                ...operation,
-                status: 'SUCCESS',
-                executed: true,
-                timestamp: new Date().toISOString()
-              });
-              
-              // Small delay between operations
-              await new Promise(resolve => setTimeout(resolve, 500));
-            } catch (error) {
-              results.operations.push({
-                ...operation,
-                status: 'FAILED',
-                executed: false,
-                error: error instanceof Error ? error.message : String(error),
-                timestamp: new Date().toISOString()
-              });
-            }
-          }
-          
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `BULK OPERATIONS TEST (EXECUTED)\n\n${JSON.stringify(results, null, 2)}`,
-              },
-            ],
-          };
-        }
       }
 
       default:
