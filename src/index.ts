@@ -753,6 +753,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'download_attachment',
+        description: 'Download an email attachment. If savePath is provided, saves the file to disk and returns the file path and size. Otherwise returns a download URL.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            emailId: {
+              type: 'string',
+              description: 'ID of the email',
+            },
+            attachmentId: {
+              type: 'string',
+              description: 'ID of the attachment',
+            },
+            savePath: {
+              type: 'string',
+              description: 'File path within ~/Downloads/fastmail-mcp/ to save the attachment to. Paths outside this directory are rejected for security. Parent directories will be created automatically.',
+            },
+          },
+          required: ['emailId', 'attachmentId'],
+        },
+      },
+      {
         name: 'advanced_search',
         description: 'Advanced email search with multiple criteria',
         inputSchema: {
@@ -1609,6 +1631,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+
+      case 'download_attachment': {
+        const { emailId, attachmentId, savePath } = args as any;
+        if (!emailId || !attachmentId) {
+          throw new McpError(ErrorCode.InvalidParams, 'emailId and attachmentId are required');
+        }
+        const client = initializeClient();
+        try {
+          if (savePath) {
+            const result = await client.downloadAttachmentToFile(emailId, attachmentId, savePath);
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `Saved to: ${savePath} (${result.bytesWritten} bytes)`,
+                },
+              ],
+            };
+          } else {
+            const downloadUrl = await client.downloadAttachment(emailId, attachmentId);
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `Download URL: ${downloadUrl}`,
+                },
+              ],
+            };
+          }
+        } catch (error) {
+          // Let path validation errors through so users see why their savePath was rejected
+          if (error instanceof Error && (error.message.includes('Save path') || error.message.includes('null bytes'))) {
+            throw new McpError(ErrorCode.InvalidParams, error.message);
+          }
+          // Sanitize other errors to avoid leaking attachment metadata
+          throw new McpError(
+            ErrorCode.InternalError,
+            'Attachment download failed. Verify emailId and attachmentId and try again.'
+          );
+        }
+      }
 
       case 'advanced_search': {
         const { query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, since, before, limit } = args as any;
