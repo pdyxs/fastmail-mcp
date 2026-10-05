@@ -4,6 +4,7 @@ import { dirname, resolve, normalize } from 'path';
 import { homedir } from 'os';
 import TurndownService from 'turndown';
 import { MailboxNode, pickMailboxPath, buildWebUrl, resolveWebUserId } from './web-url.js';
+import { extractEmailContent, EmailLink } from './email-content.js';
 
 export interface JmapSession {
   apiUrl: string;
@@ -318,6 +319,57 @@ export class JmapClient {
       inReplyTo: email.inReplyTo,
       references: email.references,
     })));
+  }
+
+  /**
+   * Reader-oriented view of one email: cleaned plain text (no CSS, tracking
+   * pixels or invisible padding), the meaningful links in document order,
+   * and the "view in browser" URL if the email has one.
+   */
+  async getEmailContent(id: string): Promise<{
+    id: string;
+    subject: string;
+    from: any;
+    receivedAt: string;
+    webUrl: string;
+    webVersionUrl: string | null;
+    text: string;
+    links: EmailLink[];
+  }> {
+    const session = await this.getSession();
+
+    const request: JmapRequest = {
+      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+      methodCalls: [
+        ['Email/get', {
+          accountId: session.accountId,
+          ids: [id],
+          properties: ['id', 'subject', 'from', 'receivedAt', 'threadId', 'mailboxIds', 'textBody', 'htmlBody', 'bodyValues'],
+          bodyProperties: ['partId', 'blobId', 'type', 'size'],
+          fetchTextBodyValues: true,
+          fetchHTMLBodyValues: true,
+        }, 'email']
+      ]
+    };
+
+    const response = await this.makeRequest(request);
+    const result = this.getMethodResult(response, 0);
+    const email = result.list?.[0];
+    if (!email || result.notFound?.includes(id)) {
+      throw new Error(`Email with ID '${id}' not found`);
+    }
+
+    const { text, links, webVersionUrl } = extractEmailContent(email);
+    return {
+      id: email.id,
+      subject: email.subject,
+      from: email.from,
+      receivedAt: email.receivedAt,
+      webUrl: await this.webUrlFor(email),
+      webVersionUrl,
+      text,
+      links,
+    };
   }
 
   private extractEmailBody(email: any): string {

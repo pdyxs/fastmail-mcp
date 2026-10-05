@@ -154,6 +154,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'get_email_content',
+        description: 'Get a reader-friendly view of an email: cleaned plain text (CSS, tracking pixels and invisible padding stripped), the meaningful links in document order as {text, url} (image-only, social, share and unsubscribe links dropped), webVersionUrl (the "view in browser"/Substack post link, or null) and webUrl (opens this email in Fastmail). Each kept link is marked " [n]" in the text, where n is its 1-based index in links. Prefer this over get_email for newsletters.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            emailId: {
+              type: 'string',
+              description: 'ID of the email to read',
+            },
+          },
+          required: ['emailId'],
+        },
+      },
+      {
         name: 'get_emails',
         description: 'Batch-fetch multiple emails by ID in a single call. Prefer this over looping get_email when you need more than one.',
         inputSchema: {
@@ -1030,6 +1044,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text: JSON.stringify(email, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'get_email_content': {
+        const { emailId } = args as any;
+        if (!emailId) {
+          throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
+        }
+        const content = await client.getEmailContent(emailId);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(content, null, 2),
             },
           ],
         };

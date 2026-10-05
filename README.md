@@ -73,6 +73,8 @@ A Model Context Protocol (MCP) server that provides access to the Fastmail API, 
    export FASTMAIL_API_TOKEN="your_api_token_here"
    # Optional: customize base URL (defaults to https://api.fastmail.com)
    export FASTMAIL_BASE_URL="https://api.fastmail.com"
+   # Optional: the web app's ?u= value for webUrl links (derived from the JMAP accountId by default)
+   export FASTMAIL_WEB_USER_ID="..."
    ```
 
 ### Running the Server
@@ -145,6 +147,7 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 - **list_emails**: List emails from a specific mailbox or all mailboxes
   - Parameters: `mailboxId` (optional), `limit` (default: 20)
 - **get_email**: Get a specific email by ID
+- **get_email_content**: Reader view of an email — cleaned text, meaningful links (`[n]`-marked in the text), web-version ("view in browser") URL and Fastmail webUrl
   - Parameters: `emailId` (required)
 - **send_email**: Send an email (supports threading via optional `inReplyTo` and `references` headers)
   - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array)

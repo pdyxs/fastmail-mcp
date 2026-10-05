@@ -77,3 +77,34 @@ describe('webUrl on fetched emails', () => {
     assert.equal(getMailboxes.mock.calls.length, 1);
   });
 });
+
+describe('getEmailContent', () => {
+  const SUDOKU = JSON.parse(readFileSync(new URL('./fixtures/artisanal-sudoku-247.json', import.meta.url), 'utf8'));
+
+  it('returns subject/from/receivedAt/webUrl plus cleaned text, links and webVersionUrl', async () => {
+    const { client } = makeClient();
+    const makeReq = mock.method(client, 'makeRequest', async () => emailResponse([SUDOKU]));
+    const content = await client.getEmailContent('StmP5P6Dmx8Z');
+
+    const args = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    assert.deepEqual(args.ids, ['StmP5P6Dmx8Z']);
+    assert.ok(args.properties.includes('mailboxIds'));
+    assert.equal(args.fetchHTMLBodyValues, true);
+
+    assert.deepEqual(Object.keys(content).sort(), ['from', 'id', 'links', 'receivedAt', 'subject', 'text', 'webUrl', 'webVersionUrl']);
+    assert.equal(content.id, 'StmP5P6Dmx8Z');
+    assert.equal(content.subject, 'Artisanal Sudoku, Volume 247');
+    assert.deepEqual(content.from, SUDOKU.from);
+    assert.equal(content.receivedAt, SUDOKU.receivedAt);
+    assert.equal(content.webUrl, 'https://app.fastmail.com/mail/Inbox.Feed/AvcOCME5z7sN.StmP5P6Dmx8Z?u=1234abcd');
+    assert.equal(content.webVersionUrl, 'https://open.substack.com/pub/artisanalsudoku/p/artisanal-sudoku-volume-247');
+    assert.match(content.text, /Melon Baller/);
+    assert.ok(content.links.some((l: any) => l.text === 'Quincinx'));
+  });
+
+  it('throws when the email is not found', async () => {
+    const { client } = makeClient();
+    mock.method(client, 'makeRequest', async () => ({ methodResponses: [['Email/get', { list: [], notFound: ['x'] }, 'email']] }));
+    await assert.rejects(() => client.getEmailContent('x'), /not found/);
+  });
+});
