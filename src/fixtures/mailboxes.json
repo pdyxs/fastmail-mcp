@@ -1,0 +1,38 @@
+[
+  {
+    "id": "P-F",
+    "name": "Inbox",
+    "parentId": null,
+    "role": "inbox"
+  },
+  {
+    "id": "P6-",
+    "name": "Archive",
+    "parentId": null,
+    "role": "archive"
+  },
+  {
+    "id": "P3V",
+    "name": "Drafts",
+    "parentId": null,
+    "role": "drafts"
+  },
+  {
+    "id": "P2F",
+    "name": "Sent",
+    "parentId": null,
+    "role": "sent"
+  },
+  {
+    "id": "P1-",
+    "name": "Trash",
+    "parentId": null,
+    "role": "trash"
+  },
+  {
+    "id": "P2Ubw",
+    "name": "Feed",
+    "parentId": "P-F",
+    "role": null
+  }
+]

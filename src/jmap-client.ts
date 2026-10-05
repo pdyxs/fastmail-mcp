@@ -3,6 +3,7 @@ import { writeFile, mkdir } from 'fs/promises';
 import { dirname, resolve, normalize } from 'path';
 import { homedir } from 'os';
 import TurndownService from 'turndown';
+import { MailboxNode, pickMailboxPath, buildWebUrl, resolveWebUserId } from './web-url.js';
 
 export interface JmapSession {
   apiUrl: string;
@@ -136,7 +137,30 @@ export class JmapClient {
     return this.getListResult(response, 0);
   }
 
-  private mailboxCache: Array<{ id: string; name: string; role?: string }> | null = null;
+  private mailboxCache: MailboxNode[] | null = null;
+
+  /** Mailbox tree (id, name, parentId, role), fetched once per client instance. */
+  private async getMailboxTree(): Promise<MailboxNode[]> {
+    if (!this.mailboxCache) {
+      const boxes = await this.getMailboxes();
+      this.mailboxCache = boxes.map((b: any) => ({ id: b.id, name: b.name, parentId: b.parentId ?? null, role: b.role }));
+    }
+    return this.mailboxCache;
+  }
+
+  /** Fastmail web-app link that opens this specific email in its current mailbox. */
+  private async webUrlFor(email: { id: string; threadId?: string; mailboxIds?: Record<string, boolean> }): Promise<string> {
+    const session = await this.getSession();
+    const mailboxPath = email.mailboxIds && email.threadId
+      ? pickMailboxPath(email.mailboxIds, await this.getMailboxTree())
+      : null;
+    return buildWebUrl({
+      emailId: email.id,
+      threadId: email.threadId,
+      mailboxPath,
+      webUserId: resolveWebUserId(session.accountId),
+    });
+  }
 
   /**
    * Resolve a mailbox name or ID to a JMAP mailbox ID. Accepts an existing
@@ -146,27 +170,24 @@ export class JmapClient {
   async resolveMailboxId(nameOrId: string): Promise<string> {
     if (!nameOrId) throw new Error('mailboxId or mailboxName is required');
 
-    if (!this.mailboxCache) {
-      const boxes = await this.getMailboxes();
-      this.mailboxCache = boxes.map((b: any) => ({ id: b.id, name: b.name, role: b.role }));
-    }
+    const mailboxes = await this.getMailboxTree();
 
     // Exact ID match
-    const byId = this.mailboxCache.find(m => m.id === nameOrId);
+    const byId = mailboxes.find(m => m.id === nameOrId);
     if (byId) return byId.id;
 
     const lower = nameOrId.toLowerCase();
 
     // Role match (inbox, archive, sent, etc.)
-    const byRole = this.mailboxCache.find(m => m.role === lower);
+    const byRole = mailboxes.find(m => m.role === lower);
     if (byRole) return byRole.id;
 
     // Case-insensitive name match
-    const byName = this.mailboxCache.find(m => m.name.toLowerCase() === lower);
+    const byName = mailboxes.find(m => m.name.toLowerCase() === lower);
     if (byName) return byName.id;
 
     // Partial name match
-    const byPartial = this.mailboxCache.filter(m => m.name.toLowerCase().includes(lower));
+    const byPartial = mailboxes.filter(m => m.name.toLowerCase().includes(lower));
     if (byPartial.length === 1) return byPartial[0].id;
     if (byPartial.length > 1) {
       throw new Error(
@@ -174,7 +195,7 @@ export class JmapClient {
       );
     }
 
-    const available = this.mailboxCache.map(m => m.name).slice(0, 20).join(', ');
+    const available = mailboxes.map(m => m.name).slice(0, 20).join(', ');
     throw new Error(`Mailbox "${nameOrId}" not found. Available: ${available}`);
   }
 
@@ -213,7 +234,7 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           ids: [id],
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'textBody', 'htmlBody', 'attachments', 'bodyValues', 'messageId', 'threadId', 'inReplyTo', 'references'],
+          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'textBody', 'htmlBody', 'attachments', 'bodyValues', 'messageId', 'threadId', 'mailboxIds', 'inReplyTo', 'references'],
           bodyProperties: ['partId', 'blobId', 'type', 'size'],
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,
@@ -237,7 +258,7 @@ export class JmapClient {
 
     return {
       id: email.id,
-      webUrl: `https://app.fastmail.com/mail/email/${email.id}`,
+      webUrl: await this.webUrlFor(email),
       subject: email.subject,
       from: email.from,
       to: email.to,
@@ -269,7 +290,7 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           ids,
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'textBody', 'htmlBody', 'attachments', 'bodyValues', 'messageId', 'threadId', 'inReplyTo', 'references'],
+          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'textBody', 'htmlBody', 'attachments', 'bodyValues', 'messageId', 'threadId', 'mailboxIds', 'inReplyTo', 'references'],
           bodyProperties: ['partId', 'blobId', 'type', 'size'],
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,
@@ -281,9 +302,9 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
     const list = result.list || [];
 
-    return list.map((email: any) => ({
+    return Promise.all(list.map(async (email: any) => ({
       id: email.id,
-      webUrl: `https://app.fastmail.com/mail/email/${email.id}`,
+      webUrl: await this.webUrlFor(email),
       subject: email.subject,
       from: email.from,
       to: email.to,
@@ -296,7 +317,7 @@ export class JmapClient {
       threadId: email.threadId,
       inReplyTo: email.inReplyTo,
       references: email.references,
-    }));
+    })));
   }
 
   private extractEmailBody(email: any): string {
